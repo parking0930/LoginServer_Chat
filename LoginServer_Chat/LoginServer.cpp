@@ -149,23 +149,29 @@ void LoginServer::Login(Character* pCharacter, CNetPacket* pPacket)
 		TlsSetValue(_tlsIdxDB, conn);
 	}
 
+	// DB Read
 	BYTE isSuccess = 0;
 	do
 	{
-		if (!conn->ReqQuery("select count(*) from account where accountno=%lld", pCharacter->_accountNo))
+		if (!conn->ReqQuery("select a.userid, a.usernick, sessionkey "
+							"from account as a, sessionkey as b "
+							"where a.accountno=b.accountno and a.accountno=%lld", pCharacter->_accountNo))
 			break;
 
 		MYSQL_ROW sql_row = conn->FetchRow();
-		if (sql_row[0][0] == '0')
+		if (sql_row == NULL)
 			break;
+
+		MultiByteToWideChar(CP_UTF8, 0, sql_row[0], -1, pCharacter->_id, 20);
+		MultiByteToWideChar(CP_UTF8, 0, sql_row[1], -1, pCharacter->_nickname, 20);
 		conn->FreeQueryResult();
 		isSuccess = 1;
 	} while (0);
 
 	// Redis
+	char strAccountNo[10];
 	if (isSuccess)
 	{
-		char strAccountNo[10];
 		sprintf_s(strAccountNo, "%lld", pCharacter->_accountNo);
 		cpp_redis::client* client = reinterpret_cast<cpp_redis::client*>(TlsGetValue(_tlsIdxRedis));
 		if (client == nullptr)
@@ -174,30 +180,36 @@ void LoginServer::Login(Character* pCharacter, CNetPacket* pPacket)
 			client->connect();
 			TlsSetValue(_tlsIdxRedis, client);
 		}
-		client->set_advanced(strAccountNo, pCharacter->_sessionKey, true, 10000);
+		client->set_advanced(strAccountNo, pCharacter->_sessionKey, true, 5000);
 		client->sync_commit();
 	}
 
-	WCHAR dummyID[20] = L"0";
-	WCHAR dummyNick[20] = L"0";
-	WCHAR GameServerIP[16] = L"127.0.0.1";
-	USHORT GameServerPort = 20002;
+
+	WCHAR GameServerIP[16] = L"127.0.0.1"; // 임시
+	USHORT GameServerPort = 20002; // 임시
 	WCHAR ChatServerIP[16] = L"127.0.0.1";
 	USHORT ChatServerPort = 20000;
-
 	CNetPacket* pSndPkt = CNetPacket::Alloc();
 	*pSndPkt << (WORD)en_PACKET_CS_LOGIN_RES_LOGIN;
 	*pSndPkt << pCharacter->_accountNo;
 	*pSndPkt << isSuccess;
-	pSndPkt->SetData((char*)dummyID, sizeof(dummyID));
-	pSndPkt->SetData((char*)dummyNick, sizeof(dummyNick));
+	pSndPkt->SetData((char*)pCharacter->_id, sizeof(pCharacter->_id));
+	pSndPkt->SetData((char*)pCharacter->_nickname, sizeof(pCharacter->_nickname));
 	pSndPkt->SetData((char*)GameServerIP, sizeof(GameServerIP));
 	pSndPkt->SetData((char*)&GameServerPort, sizeof(GameServerPort));
 	pSndPkt->SetData((char*)ChatServerIP, sizeof(ChatServerIP));
 	pSndPkt->SetData((char*)&ChatServerPort, sizeof(ChatServerPort));
 	SendPacket(pCharacter->_sessionID, pSndPkt);
 	CNetPacket::Free(pSndPkt);
-	InterlockedIncrement((LONG*)&_loginSuccessCnt);
+	// OnSend -> Disconnect 기능 추가 예정
+	if (isSuccess)
+	{
+		InterlockedIncrement((LONG*)&_loginSuccessCnt);
+	}
+	else
+	{
+		Disconnect(pCharacter->_sessionID);
+	}
 }
 
 LoginServer::Character* LoginServer::FindCharacter(unsigned __int64 sessionID)
